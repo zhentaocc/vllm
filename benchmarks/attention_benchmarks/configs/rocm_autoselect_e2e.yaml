@@ -1,0 +1,260 @@
+# End-to-end reference points for rocm_backend_autoselect.py.
+# MI355X, 1 GPU, vLLM 0.30.1rc1.dev558+g0cbac6cd1, aiter 0.1.23, MRV2,
+# `vllm bench serve` with OSL 1024 (--ignore-eos), greedy, no prefix-cache hits,
+# --max-num-seqs 256, --max-num-batched-tokens 16384 (default),
+# --gpu-memory-utilization 0.85. Each run forces one attention backend.
+# results: [ISL, concurrency, output tok/s, median TPOT ms, median TTFT ms,
+#            accept length or null, number of prompts]
+osl: 1024
+max_num_batched_tokens: 16384
+scenarios:
+  qwen3_8b_nospec:
+    description: "Qwen/Qwen3-8B (dense, YaRN x4), no spec decode"
+    model: {num_q_heads: 32, num_kv_heads: 8, head_dim: 128, attn_layers: 36}
+    query_len: 1
+    max_model_len: 131072
+    hybrid: false
+    runs:
+      ROCM_ATTN:
+        source: ml131072/d_nospec__main
+        block_size: 16
+        kv_cache_layout: LHBNC
+        kv_cache_tokens: 1602352
+        results:
+          - [1024, 1, 264.3, 3.76, 30, null, 8]
+          - [1024, 16, 2686.4, 5.70, 200, null, 64]
+          - [1024, 64, 7151.1, 8.36, 554, null, 256]
+          - [8192, 1, 237.5, 4.02, 196, null, 8]
+          - [8192, 16, 1052.3, 12.50, 2064, null, 64]
+          - [8192, 64, 1356.9, 41.66, 3154, null, 256]
+          - [65536, 1, 91.9, 5.56, 5422, null, 4]
+          - [65536, 8, 50.4, 117.28, 40863, null, 16]
+          - [65536, 16, 45.2, 290.80, 41790, null, 32]
+          - [130048, 1, 34.6, 7.40, 22011, null, 4]
+          - [130048, 4, 19.5, 118.30, 89767, null, 8]
+          - [130048, 8, 15.4, 421.73, 109334, null, 16]
+      ROCM_AITER_UNIFIED_ATTN:
+        source: ml131072/d_nospec__ua
+        block_size: 64
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 1616768
+        results:
+          - [1024, 1, 250.0, 3.98, 32, null, 8]
+          - [1024, 16, 3005.3, 5.11, 179, null, 64]
+          - [1024, 64, 8233.8, 7.33, 513, null, 256]
+          - [8192, 1, 239.5, 4.10, 146, null, 8]
+          - [8192, 16, 1629.8, 8.85, 898, null, 64]
+          - [8192, 64, 2665.5, 22.86, 1015, null, 256]
+          - [65536, 1, 143.3, 4.87, 2163, null, 4]
+          - [65536, 8, 241.0, 26.57, 6714, null, 16]
+          - [65536, 16, 261.3, 55.39, 5647, null, 32]
+          - [130048, 1, 76.7, 6.15, 7064, null, 4]
+          - [130048, 4, 91.8, 25.50, 18537, null, 8]
+          - [130048, 8, 95.0, 68.15, 16371, null, 16]
+  qwen3_32b_eagle3:
+    description: "Qwen/Qwen3-32B (dense) + EAGLE3, 3 spec tokens"
+    model: {num_q_heads: 64, num_kv_heads: 8, head_dim: 128, attn_layers: 64}
+    query_len: 4
+    max_model_len: 131072
+    hybrid: false
+    runs:
+      ROCM_ATTN:
+        source: public/q3/q_eagle__main
+        block_size: 16
+        kv_cache_layout: LHBNC
+        kv_cache_tokens: 657472
+        results:
+          - [1024, 1, 99.5, 9.95, 80, 2.149, 8]
+          - [1024, 16, 590.1, 26.36, 490, 2.287, 64]
+          - [1024, 64, 616.5, 102.20, 2202, 2.304, 256]
+          - [8192, 1, 36.4, 26.92, 666, 2.090, 8]
+          - [8192, 16, 70.9, 224.67, 12424, 2.099, 64]
+          - [65536, 1, 3.6, 257.01, 20145, 1.296, 4]
+          - [65536, 8, 3.3, 1970.07, 349668, 1.327, 16]
+      ROCM_AITER_UNIFIED_ATTN:
+        source: public/q3/q_eagle__pr
+        block_size: 64
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 676992
+        results:
+          - [1024, 1, 143.6, 6.89, 78, 2.204, 8]
+          - [1024, 16, 1755.9, 8.41, 107, 2.296, 64]
+          - [1024, 64, 3173.1, 17.04, 229, 1.640, 256]
+          - [8192, 1, 83.0, 11.53, 490, 2.120, 8]
+          - [8192, 16, 656.8, 21.95, 564, 1.663, 64]
+          - [8192, 64, 1083.7, 50.65, 1028, 1.636, 256]
+          - [65536, 1, 12.9, 72.83, 7605, 1.358, 4]
+          - [65536, 8, 56.6, 110.74, 12623, 1.304, 16]
+          - [65536, 16, 59.0, 131.01, 72443, 1.302, 32]
+  qwen3_next_nospec:
+    description: "Qwen/Qwen3-Next-80B-A3B-Instruct (hybrid), no spec decode"
+    model: {num_q_heads: 16, num_kv_heads: 2, head_dim: 256, attn_layers: 12}
+    query_len: 1
+    max_model_len: 132096
+    hybrid: true
+    runs:
+      ROCM_ATTN:
+        source: public/q3/n_nospec__main
+        block_size: 544
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 3401074
+        results:
+          - [1024, 1, 150.4, 6.51, 142, null, 8]
+          - [1024, 16, 1201.4, 13.11, 378, null, 64]
+          - [1024, 64, 2831.1, 21.97, 729, null, 256]
+          - [8192, 1, 67.5, 14.60, 212, null, 8]
+          - [8192, 16, 631.9, 23.13, 2156, null, 64]
+          - [8192, 64, 1336.1, 45.74, 2604, null, 256]
+          - [65536, 1, 11.7, 80.12, 2820, null, 4]
+          - [65536, 8, 45.5, 147.32, 30863, null, 16]
+          - [65536, 16, 44.0, 306.56, 53759, null, 32]
+          - [130048, 1, 6.1, 152.85, 9326, null, 4]
+          - [130048, 4, 15.7, 217.76, 49576, null, 8]
+          - [130048, 8, 16.9, 397.09, 86384, null, 16]
+      ROCM_AITER_UNIFIED_ATTN:
+        source: public/q3/n_nospec__pr
+        block_size: 576
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 3371806
+        results:
+          - [1024, 1, 176.9, 5.52, 139, null, 8]
+          - [1024, 16, 1202.7, 11.57, 364, null, 64]
+          - [1024, 64, 3016.6, 20.61, 693, null, 256]
+          - [8192, 1, 174.3, 5.54, 200, null, 8]
+          - [8192, 16, 1166.7, 12.63, 1152, null, 64]
+          - [8192, 64, 2162.9, 28.58, 1221, null, 256]
+          - [65536, 1, 135.7, 5.77, 1648, null, 4]
+          - [65536, 8, 356.0, 16.56, 5946, null, 16]
+          - [65536, 16, 413.8, 33.50, 5275, null, 32]
+          - [130048, 1, 99.0, 6.06, 4131, null, 4]
+          - [130048, 4, 161.9, 13.69, 11242, null, 8]
+          - [130048, 8, 174.9, 31.39, 14798, null, 16]
+  qwen3_next_mtp3:
+    description: "Qwen/Qwen3-Next-80B-A3B-Instruct (hybrid) + MTP, 3 spec tokens"
+    model: {num_q_heads: 16, num_kv_heads: 2, head_dim: 256, attn_layers: 12}
+    query_len: 4
+    max_model_len: 132096
+    hybrid: true
+    runs:
+      ROCM_ATTN:
+        source: public/q3/n_mtp__main
+        block_size: 560
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 2845063
+        results:
+          - [1024, 1, 211.7, 4.39, 77, 2.558, 8]
+          - [1024, 16, 1597.0, 9.38, 155, 2.712, 64]
+          - [1024, 64, 2894.6, 20.97, 435, 2.706, 256]
+          - [8192, 1, 96.4, 10.21, 224, 2.642, 8]
+          - [8192, 16, 517.6, 29.24, 2173, 2.653, 64]
+          - [8192, 64, 286.7, 213.37, 13143, 2.631, 256]
+          - [65536, 1, 15.8, 59.74, 2978, 2.564, 4]
+          - [65536, 8, 28.8, 218.85, 48517, 2.577, 16]
+          - [65536, 16, 19.4, 680.48, 135898, 2.637, 32]
+          - [130048, 1, 7.7, 119.83, 9995, 2.554, 4]
+          - [130048, 4, 14.2, 199.90, 80563, 2.593, 8]
+          - [130048, 8, 8.8, 746.98, 137474, 2.571, 16]
+      ROCM_AITER_UNIFIED_ATTN:
+        source: public/q3/n_mtp__pr
+        block_size: 576
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 2754066
+        results:
+          - [1024, 1, 180.8, 6.08, 78, 2.600, 8]
+          - [1024, 16, 1800.3, 8.16, 105, 2.717, 64]
+          - [1024, 64, 3894.6, 15.60, 216, 2.718, 256]
+          - [8192, 1, 137.2, 7.01, 207, 2.714, 8]
+          - [8192, 16, 1329.4, 11.26, 405, 2.663, 64]
+          - [8192, 64, 2687.8, 21.67, 679, 2.624, 256]
+          - [65536, 1, 56.9, 16.08, 1641, 2.593, 4]
+          - [65536, 8, 233.6, 26.32, 3837, 2.573, 16]
+          - [65536, 16, 348.7, 37.46, 4993, 2.637, 32]
+          - [130048, 1, 30.7, 28.47, 4263, 2.626, 4]
+          - [130048, 4, 84.3, 39.66, 4845, 2.621, 8]
+          - [130048, 8, 121.2, 52.02, 9112, 2.612, 16]
+  qwen3_8_27b_nospec:
+    description: "Qwen3.8-27B (hybrid), no spec decode"
+    model: {num_q_heads: 24, num_kv_heads: 4, head_dim: 256, attn_layers: 16}
+    query_len: 1
+    max_model_len: 132096
+    hybrid: true
+    runs:
+      ROCM_ATTN:
+        source: results/h_nospec__main
+        block_size: 784
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 2891770
+        results:
+          - [1024, 1, 78.8, 12.63, 87, null, 8]
+          - [1024, 16, 935.3, 16.38, 755, null, 64]
+          - [1024, 64, 2797.0, 20.63, 2345, null, 256]
+          - [8192, 1, 22.5, 27.86, 464, null, 8]
+          - [8192, 16, 395.7, 35.14, 4924, null, 64]
+          - [8192, 64, 816.0, 71.03, 6155, null, 256]
+          - [65536, 1, 7.9, 120.09, 6574, null, 4]
+          - [65536, 8, 26.3, 253.20, 57480, null, 16]
+          - [65536, 16, 17.9, 751.85, 107249, null, 32]
+          - [130048, 1, 4.0, 227.41, 21015, null, 4]
+          - [130048, 4, 9.0, 367.33, 96620, null, 8]
+          - [130048, 8, 8.9, 742.37, 169503, null, 16]
+      ROCM_AITER_UNIFIED_ATTN:
+        source: results/h_nospec__pr
+        block_size: 832
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 3289590
+        results:
+          - [1024, 1, 96.1, 10.33, 84, null, 8]
+          - [1024, 16, 1083.1, 14.04, 759, null, 64]
+          - [1024, 64, 3067.4, 18.64, 2184, null, 256]
+          - [8192, 1, 92.0, 10.46, 434, null, 8]
+          - [8192, 16, 755.5, 17.97, 3283, null, 64]
+          - [8192, 64, 830.2, 43.34, 3641, null, 256]
+          - [65536, 1, 66.4, 11.06, 4063, null, 4]
+          - [65536, 8, 158.3, 37.90, 12375, null, 16]
+          - [65536, 16, 185.8, 71.50, 14555, null, 32]
+          - [130048, 1, 46.6, 11.64, 10060, null, 4]
+          - [130048, 4, 72.7, 29.82, 25880, null, 8]
+          - [130048, 8, 79.7, 76.18, 24613, null, 16]
+  qwen3_6_35b_a3b_nospec:
+    description: "Qwen/Qwen3.6-35B-A3B (hybrid MoE), no spec decode"
+    model: {num_q_heads: 16, num_kv_heads: 2, head_dim: 256, attn_layers: 10}
+    query_len: 1
+    max_model_len: 132096
+    hybrid: true
+    runs:
+      ROCM_ATTN:
+        source: results/m_nospec__main
+        block_size: 1056
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 8206964
+        results:
+          - [1024, 1, 191.1, 5.15, 84, null, 8]
+          - [1024, 16, 1609.3, 9.71, 254, null, 64]
+          - [1024, 64, 3994.2, 15.64, 415, null, 256]
+          - [8192, 1, 81.3, 11.84, 170, null, 8]
+          - [8192, 16, 821.5, 17.90, 1557, null, 64]
+          - [8192, 64, 1833.3, 33.21, 1736, null, 256]
+          - [65536, 1, 14.8, 65.42, 2413, null, 4]
+          - [65536, 8, 62.4, 111.83, 17947, null, 16]
+          - [65536, 16, 67.9, 196.49, 31659, null, 32]
+          - [130048, 1, 7.5, 125.74, 7794, null, 4]
+          - [130048, 4, 19.3, 176.73, 37995, null, 8]
+          - [130048, 8, 21.6, 312.15, 64799, null, 16]
+      ROCM_AITER_UNIFIED_ATTN:
+        source: results/m_nospec__pr
+        block_size: 1088
+        kv_cache_layout: LBHNC
+        kv_cache_tokens: 8181696
+        results:
+          - [1024, 1, 223.4, 4.39, 89, null, 8]
+          - [1024, 16, 1836.0, 8.51, 250, null, 64]
+          - [1024, 64, 4262.3, 14.41, 645, null, 256]
+          - [8192, 1, 207.8, 4.46, 203, null, 8]
+          - [8192, 16, 1567.5, 9.29, 925, null, 64]
+          - [8192, 64, 2982.4, 18.52, 2196, null, 256]
+          - [65536, 1, 171.2, 4.61, 1264, null, 4]
+          - [65536, 8, 460.7, 11.74, 5746, null, 16]
+          - [65536, 16, 539.6, 24.94, 4755, null, 32]
+          - [130048, 1, 124.1, 4.83, 3274, null, 4]
+          - [130048, 4, 210.0, 10.87, 8318, null, 8]
+          - [130048, 8, 226.3, 21.99, 13618, null, 16]
