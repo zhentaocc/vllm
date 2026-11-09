@@ -1322,6 +1322,239 @@ def test_aiter_fa_varlen_capability_is_bounded_and_fail_closed(monkeypatch):
     )
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+@pytest.mark.parametrize(
+    "head_size,sliding_window,use_sinks,num_tokens,num_reqs,num_heads,num_kv_heads",
+    [
+        pytest.param(128, None, False, 8, 8, 32, 8, id="single-token-capture"),
+        pytest.param(128, None, False, 40, 32, 32, 8, id="gqa"),
+        pytest.param(128, 1024, False, 40, 32, 16, 8, id="sliding-gqa"),
+        pytest.param(64, None, True, 40, 32, 8, 1, id="sinks-mqa-hd64"),
+        pytest.param(256, None, False, 64, 8, 16, 2, id="uniform-capture-hd256"),
+    ],
+)
+def test_aiter_fa_varlen_decode_graph_replays_changed_layout(
+    tmp_path,
+    monkeypatch,
+    head_size,
+    sliding_window,
+    use_sinks,
+    num_tokens,
+    num_reqs,
+    num_heads,
+    num_kv_heads,
+):
+    """A varlen decode graph must replay any layout up to the promised bound.
+
+    The graph is captured the way model runner V2 captures adaptive
+    verification graphs: through build_for_cudagraph_capture, with dummy
+    queries spread evenly over the requests (one token each in the
+    single-token-capture case) and a bound of eight. Replays then change the
+    per-request query lengths, contexts, and padding requests on device.
+    Compare the output rows with an independent FP32 attention reference.
+    """
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is required")
+    from vllm.v1.attention.backends import rocm_aiter_fa as fa
+
+    monkeypatch.setattr(
+        rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        classmethod(lambda cls: False),
+    )
+    set_random_seed(0)
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    block_size = 16
+    dtype = torch.bfloat16
+    max_seq_len = 4096
+    LlamaConfig(
+        architectures=["LlamaForCausalLM"],
+        hidden_size=num_heads * head_size,
+        head_dim=head_size,
+        num_attention_heads=num_heads,
+        num_key_value_heads=num_kv_heads,
+        num_hidden_layers=1,
+        max_position_embeddings=max_seq_len,
+    ).save_pretrained(tmp_path)
+    num_blocks = 1 + num_reqs * cdiv(2112, block_size)
+    config = create_vllm_config(
+        model_name=str(tmp_path),
+        max_model_len=max_seq_len,
+        dtype=dtype,
+        num_gpu_blocks=num_blocks,
+        block_size=block_size,
+        max_num_seqs=32,
+        max_num_batched_tokens=256,
+    )
+    config.speculative_config = SimpleNamespace(
+        num_speculative_tokens=7,
+        enable_adaptive_verification=True,
+        parallel_drafting=False,
+        max_num_new_slots_for_drafting=0,
+    )
+    spec = create_standard_kv_cache_spec(config)
+    scale = head_size**-0.5
+    device = torch.device("cuda")
+    query = torch.empty(num_tokens, num_heads, head_size, dtype=dtype, device=device)
+    key = torch.empty(num_tokens, num_kv_heads, head_size, dtype=dtype, device=device)
+    value = torch.empty_like(key)
+    output = torch.empty_like(query)
+    sinks = (
+        torch.randn(num_heads, dtype=torch.float32, device=device)
+        if use_sinks
+        else None
+    )
+    dummy_lens = [
+        num_tokens // num_reqs + (i < num_tokens % num_reqs) for i in range(num_reqs)
+    ]
+    # The paged decode kernels size their block table by max_seq_len, so the
+    # capture batch already spans the whole model length.
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=[max_seq_len] * num_reqs, query_lens=dummy_lens),
+        block_size,
+        device,
+    )
+    common.max_query_len = 8
+    common.max_seq_len = max_seq_len
+    cache = None
+
+    def prepare(query_lens):
+        nonlocal cache
+        query_lens = query_lens + [0] * (num_reqs - len(query_lens))
+        query.normal_()
+        key.normal_()
+        value.normal_()
+        # Alternating empty, short, and beyond-the-window contexts; inactive
+        # padding requests have zero sequence length.
+        contexts = [
+            ([0, 17, 2079, 39][i % 4] if q else 0) for i, q in enumerate(query_lens)
+        ]
+        ks = [
+            torch.randn(c, num_kv_heads, head_size, dtype=dtype, device=device)
+            for c in contexts
+        ]
+        vs = [torch.randn_like(k) for k in ks]
+        actual = create_common_attn_metadata(
+            BatchSpec(
+                seq_lens=[c + q for c, q in zip(contexts, query_lens)],
+                query_lens=query_lens,
+            ),
+            block_size,
+            device,
+        )
+        fresh_cache = create_and_prepopulate_kv_cache(
+            ks,
+            vs,
+            block_size,
+            num_kv_heads,
+            head_size,
+            dtype,
+            device,
+            num_blocks,
+            actual,
+            KVCacheLayout.LBHNC,
+            randomize_blocks=True,
+        )
+        if cache is None:
+            cache = fresh_cache
+        else:
+            cache.copy_(fresh_cache)
+        common.query_start_loc.copy_(actual.query_start_loc)
+        common.seq_lens.copy_(actual.seq_lens)
+        common.block_table_tensor.zero_()
+        common.block_table_tensor[:, : actual.block_table_tensor.shape[1]].copy_(
+            actual.block_table_tensor
+        )
+        common.slot_mapping.fill_(-1)
+        common.slot_mapping[: sum(query_lens)].copy_(actual.slot_mapping)
+        return contexts, ks, vs
+
+    prepare(dummy_lens)
+    with set_current_vllm_config(config):
+        builder = fa.AiterFlashAttentionMetadataBuilder(spec, ["layer"], config, device)
+        assert builder.reorder_batch_threshold == 8
+        metadata = builder.build_for_cudagraph_capture(common)
+        assert metadata.num_prefills == 0
+        assert metadata.num_extends == 0
+        impl = fa.AiterFlashAttentionImpl(
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            scale=scale,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            kv_cache_dtype="auto",
+            attn_type=AttentionType.DECODER,
+            sinks=sinks,
+        )
+    layer = MockAttentionLayer(device)
+
+    def forward():
+        impl.do_kv_cache_update(layer, key, value, cache, common.slot_mapping)
+        impl.forward(layer, query, key, value, cache, metadata, output=output)
+
+    for _ in range(3):
+        forward()
+    torch.accelerator.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        forward()
+
+    layouts = [[1] * num_reqs, [8]]
+    if num_tokens >= 16:
+        layouts.append([8, 4, 3, 1])
+    if num_tokens >= 40:
+        layouts.append([8] * 5)
+        if num_reqs >= 11:
+            layouts.append([2, 7, 1, 5, 3, 8, 1, 1, 4, 6, 2])
+    if num_tokens >= 64:
+        layouts.append([8] * 8)
+
+    for query_lens in layouts:
+        contexts, ks, vs = prepare(query_lens)
+        output.fill_(float("nan"))
+        graph.replay()
+        torch.accelerator.synchronize()
+        start = 0
+        for i, q_len in enumerate(query_lens):
+            end = start + q_len
+            full_k = (
+                torch.cat((ks[i], key[start:end]))
+                .float()
+                .repeat_interleave(num_heads // num_kv_heads, dim=1)
+            )
+            full_v = (
+                torch.cat((vs[i], value[start:end]))
+                .float()
+                .repeat_interleave(num_heads // num_kv_heads, dim=1)
+            )
+            scores = (
+                torch.einsum("qhd,khd->hqk", query[start:end].float(), full_k) * scale
+            )
+            q_pos = torch.arange(q_len, device=device) + contexts[i]
+            k_pos = torch.arange(full_k.shape[0], device=device)
+            allowed = k_pos[None, :] <= q_pos[:, None]
+            if sliding_window is not None:
+                allowed &= k_pos[None, :] > q_pos[:, None] - sliding_window
+            scores = scores.masked_fill(~allowed[None], float("-inf"))
+            if sinks is not None:
+                sink_scores = sinks.view(-1, 1, 1).expand(-1, q_len, 1)
+                probs = torch.cat((scores, sink_scores), dim=-1).softmax(-1)[..., :-1]
+            else:
+                probs = scores.softmax(-1)
+            reference = torch.einsum("hqk,khd->qhd", probs, full_v)
+            torch.testing.assert_close(
+                output[start:end].float(),
+                reference,
+                atol=3e-2,
+                rtol=3e-2,
+                msg=lambda m, lens=query_lens, req=i: f"layout {lens}, req {req}: {m}",
+            )
+            start = end
+
+
 @pytest.mark.parametrize(
     "use_v2_model_runner,parallel_drafting,expected",
     [
